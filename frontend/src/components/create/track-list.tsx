@@ -12,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Input } from "../ui/input";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../ui/button";
 import { getPlayUrl } from "~/actions/generation";
 import { Badge } from "../ui/badge";
@@ -49,6 +49,17 @@ export function TrackList({ tracks }: { tracks: Track[] }) {
   const [trackToRename, setTrackToRename] = useState<Track | null>(null);
   const router = useRouter();
   const setTrack = usePlayerStore((state) => state.setTrack);
+
+  const hasPendingTracks = tracks.some(
+    (track) => track.status === "queued" || track.status === "processing",
+  );
+
+  // Keep statuses fresh while any song is still generating
+  useEffect(() => {
+    if (!hasPendingTracks) return;
+    const interval = setInterval(() => router.refresh(), 5000);
+    return () => clearInterval(interval);
+  }, [hasPendingTracks, router]);
 
   const handleTrackSelect = async (track: Track) => {
     if (loadingTrackId) return;
@@ -145,10 +156,12 @@ export function TrackList({ tracks }: { tracks: Track[] }) {
                       </div>
                       <div className="min-w-0 flex-1">
                         <h3 className="text-muted-foreground truncate text-sm font-medium">
-                          Processing song...
+                          {track.status === "queued"
+                            ? "Queued..."
+                            : "Processing song..."}
                         </h3>
                         <p className="text-muted-foreground truncate text-xs">
-                          Refresh to check the status.
+                          This updates automatically.
                         </p>
                       </div>
                     </div>

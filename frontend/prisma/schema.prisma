@@ -38,6 +38,7 @@ model Song {
   inferStep Float?
   audioDuration Float?
   seed Float?
+  modalCallId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -46,6 +47,7 @@ model Song {
   userId String
 
   @@index([s3Key])
+  @@index([status, updatedAt])
 }
 
 model Session {

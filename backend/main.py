@@ -1,5 +1,4 @@
-import base64
-from typing import List
+from typing import Optional
 import uuid
 import modal
 import os
@@ -17,6 +16,12 @@ image = (
     .pip_install_from_requirements("requirements.txt")
     .run_commands(["git clone https://github.com/ace-step/ACE-Step.git /tmp/ACE-Step", "cd /tmp/ACE-Step && pip install .", "pip install git+https://github.com/huggingface/transformers.git"])
     .env({"HF_HOME": "/.cache/huggingface"})
+    .add_local_python_source("prompts")
+)
+
+web_image = (
+    modal.Image.debian_slim()
+    .pip_install("fastapi[standard]", "pydantic", "boto3", "requests")
     .add_local_python_source("prompts")
 )
 
@@ -54,16 +59,24 @@ class GenerateMusicResponseS3(BaseModel):
     cover_image_s3_key: str
 
 
-class GenerateMusicResponse(BaseModel):
-    audio_data: str
+class SubmitJobResponse(BaseModel):
+    call_id: str
+
+
+class JobStatusResponse(BaseModel):
+    status: str  # "pending" | "done" | "failed"
+    s3_key: Optional[str] = None
+    cover_image_s3_key: Optional[str] = None
+    error: Optional[str] = None
 
 
 @app.cls(
     image=image,
-    # gpu="L40S",
+    gpu="L40S",
     volumes={"/models": model_volume, "/.cache/huggingface": hf_volume},
     secrets=[music_gen_secrets],
-    scaledown_window=15
+    scaledown_window=15,
+    timeout=900,
 )
 class MusicGenServer:
     @modal.enter()
@@ -137,8 +150,6 @@ class MusicGenServer:
         # Run LLM inference and return that
         return self.prompt_qwen(full_prompt)
 
-
-
     def generate_and_upload_to_s3(
             self,
             prompt: str,
@@ -191,65 +202,79 @@ class MusicGenServer:
             cover_image_s3_key=image_s3_key,
         )
 
-    @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
-    def generate(self) -> GenerateMusicResponse:
-        output_dir = "/tmp/outputs"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"{uuid.uuid4()}.wav")
+    @modal.method()
+    def run_job(self, mode: str, payload: dict) -> dict:
+        if mode == "description":
+            request = GenerateFromDescriptionRequest(**payload)
+            prompt = self.generate_prompt(request.full_described_song)
+            lyrics = ""
+            if not request.instrumental:
+                lyrics = self.generate_lyrics(request.full_described_song)
+            params = request.model_dump(exclude={"full_described_song"})
+        elif mode == "lyrics":
+            request = GenerateWithCustomLyricsRequest(**payload)
+            prompt = request.prompt
+            lyrics = request.lyrics
+            params = request.model_dump(exclude={"prompt", "lyrics"})
+        elif mode == "described_lyrics":
+            request = GenerateWithDescribedLyricsRequest(**payload)
+            prompt = request.prompt
+            lyrics = ""
+            if not request.instrumental:
+                lyrics = self.generate_lyrics(request.described_lyrics)
+            params = request.model_dump(exclude={"described_lyrics", "prompt"})
+        else:
+            raise ValueError(f"Unknown generation mode: {mode}")
 
-        self.music_model(
-            prompt="electronic rap",
-            lyrics="[verse]\nWaves on the bass, pulsing in the speakers,\nTurn the dial up, we chasing six-figure features,\nGrinding on the beats, codes in the creases,\nDigital hustler, midnight in sneakers.\n\n[chorus]\nElectro vibes, hearts beat with the hum,\nUrban legends ride, we ain't ever numb,\nCircuits sparking live, tapping on the drum,\nLiving on the edge, never succumb.\n\n[verse]\nSynthesizers blaze, city lights a glow,\nRhythm in the haze, moving with the flow,\nSwagger on stage, energy to blow,\nFrom the blocks to the booth, you already know.\n\n[bridge]\nNight's electric, streets full of dreams,\nBass hits collective, bursting at seams,\nHustle perspective, all in the schemes,\nRise and reflective, ain't no in-betweens.\n\n[verse]\nVibin' with the crew, sync in the wire,\nGot the dance moves, fire in the attire,\nRhythm and blues, soul's our supplier,\nRun the digital zoo, higher and higher.\n\n[chorus]\nElectro vibes, hearts beat with the hum,\nUrban legends ride, we ain't ever numb,\nCircuits sparking live, tapping on the drum,\nLiving on the edge, never succumb.",
-            audio_duration=180,
-            infer_step=60,
-            guidance_scale=15,
-            save_path=output_path,
-        )
-
-        with open(output_path, "rb") as f:
-            audio_bytes = f.read()
-
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-
-        os.remove(output_path)
-
-        return GenerateMusicResponse(audio_data=audio_b64)
-
-    @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
-    def generate_from_description(self, request: GenerateFromDescriptionRequest) -> GenerateMusicResponseS3:
-        # Generating a prompt
-        prompt = self.generate_prompt(request.full_described_song)
-
-        # Generating lyrics
-        lyrics = ""
-        if not request.instrumental:
-            lyrics = self.generate_lyrics(request.full_described_song)
-        return self.generate_and_upload_to_s3(prompt=prompt, lyrics=lyrics,
-                                              **request.model_dump(exclude={"full_described_song"}))
-
-    @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
-    def generate_with_lyrics(self, request: GenerateWithCustomLyricsRequest) -> GenerateMusicResponseS3:
-        return self.generate_and_upload_to_s3(prompt=request.prompt, lyrics=request.lyrics,
-                                              **request.model_dump(exclude={"prompt", "lyrics"}))
-
-    @modal.fastapi_endpoint(method="POST", requires_proxy_auth=False)     ## Temporary change
+        result = self.generate_and_upload_to_s3(
+            prompt=prompt, lyrics=lyrics, **params)
+        return result.model_dump()
 
 
+# Lightweight CPU endpoints: they queue work on the GPU class and return immediately,
+# so a request never blocks for the length of a generation.
+def spawn_job(mode: str, payload: dict) -> SubmitJobResponse:
+    call = MusicGenServer().run_job.spawn(mode, payload)
+    return SubmitJobResponse(call_id=call.object_id)
 
-    
-    def generate_with_described_lyrics(self, request: GenerateWithDescribedLyricsRequest) -> GenerateMusicResponseS3:
-        # Generating lyrics
-        lyrics = ""
-        if not request.instrumental:
-            lyrics = self.generate_lyrics(request.described_lyrics)
-        return self.generate_and_upload_to_s3(prompt=request.prompt, lyrics=lyrics,
-                                              **request.model_dump(exclude={"described_lyrics", "prompt"}))
+
+@app.function(image=web_image)
+@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
+def generate_from_description(request: GenerateFromDescriptionRequest) -> SubmitJobResponse:
+    return spawn_job("description", request.model_dump())
+
+
+@app.function(image=web_image)
+@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
+def generate_with_lyrics(request: GenerateWithCustomLyricsRequest) -> SubmitJobResponse:
+    return spawn_job("lyrics", request.model_dump())
+
+
+@app.function(image=web_image)
+@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
+def generate_with_described_lyrics(request: GenerateWithDescribedLyricsRequest) -> SubmitJobResponse:
+    return spawn_job("described_lyrics", request.model_dump())
+
+
+@app.function(image=web_image)
+@modal.fastapi_endpoint(method="GET", requires_proxy_auth=True)
+def generation_status(call_id: str) -> JobStatusResponse:
+    try:
+        result = modal.FunctionCall.from_id(call_id).get(timeout=0)
+    except (TimeoutError, modal.exception.TimeoutError):
+        return JobStatusResponse(status="pending")
+    except Exception as e:
+        return JobStatusResponse(status="failed", error=str(e))
+
+    return JobStatusResponse(status="done", **result)
 
 
 @app.local_entrypoint()
 def main():
-    server = MusicGenServer()
-    endpoint_url = server.generate_with_described_lyrics.get_web_url()
+    import time
+
+    submit_url = generate_with_described_lyrics.get_web_url()
+    status_url = generation_status.get_web_url()
 
     request_data = GenerateWithDescribedLyricsRequest(
         prompt="rave, funk, 140BPM, disco",
@@ -257,30 +282,28 @@ def main():
         guidance_scale=15
     )
 
-    payload = request_data.model_dump()
-
     headers = {
         "Modal-Key": os.environ.get("MODAL_KEY", ""),
         "Modal-Secret": os.environ.get("MODAL_SECRET", ""),
     }
 
-    response = requests.post(endpoint_url, json=payload, headers=headers)
+    response = requests.post(
+        submit_url, json=request_data.model_dump(), headers=headers, timeout=30)
     response.raise_for_status()
-    result = GenerateMusicResponseS3(**response.json())
+    call_id = SubmitJobResponse(**response.json()).call_id
+    print(f"Submitted job: {call_id}")
 
-    print(
-        f"Success: {result.s3_key} {result.cover_image_s3_key} {result.categories}")
+    while True:
+        time.sleep(10)
+        response = requests.get(status_url, params={"call_id": call_id},
+                                headers=headers, timeout=15)
+        response.raise_for_status()
+        status = JobStatusResponse(**response.json())
+        print(f"Status: {status.status}")
+        if status.status != "pending":
+            break
 
-    # audio_bytes = base64.b64decode(result.audio_data)
-    # output_filename = "generated.wav"
-    # with open(output_filename, "wb") as f:
-    #     f.write(audio_bytes).abs
-
-
-
-
-
-
-
-
-    
+    if status.status == "done":
+        print(f"Success: {status.s3_key} {status.cover_image_s3_key}")
+    else:
+        print(f"Failed: {status.error}")
