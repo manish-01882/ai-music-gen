@@ -216,19 +216,19 @@ class MusicGenServer:
             lyrics = ""
             if not request.instrumental:
                 lyrics = self.generate_lyrics(request.full_described_song)
-            params = request.model_dump(exclude={"full_described_song"})
+            params = request.model_dump(exclude={"full_described_song", "song_id"})
         elif mode == "lyrics":
             request = GenerateWithCustomLyricsRequest(**payload)
             prompt = request.prompt
             lyrics = request.lyrics
-            params = request.model_dump(exclude={"prompt", "lyrics"})
+            params = request.model_dump(exclude={"prompt", "lyrics", "song_id"})
         elif mode == "described_lyrics":
             request = GenerateWithDescribedLyricsRequest(**payload)
             prompt = request.prompt
             lyrics = ""
             if not request.instrumental:
                 lyrics = self.generate_lyrics(request.described_lyrics)
-            params = request.model_dump(exclude={"described_lyrics", "prompt"})
+            params = request.model_dump(exclude={"described_lyrics", "prompt", "song_id"})
         else:
             raise ValueError(f"Unknown generation mode: {mode}")
 
@@ -315,11 +315,24 @@ def main():
     call_id = SubmitJobResponse(**response.json()).call_id
     print(f"Submitted job: {call_id}")
 
+    # Tolerate transient poll failures (e.g. a preempted endpoint container):
+    # crashing here would stop the app and kill the running GPU job
+    max_consecutive_errors = 5
+    consecutive_errors = 0
+
     while True:
         time.sleep(10)
-        response = requests.get(status_url, params={"call_id": call_id},
-                                headers=headers, timeout=15)
-        response.raise_for_status()
+        try:
+            response = requests.get(status_url, params={"call_id": call_id},
+                                    headers=headers, timeout=15)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            consecutive_errors += 1
+            print(f"Status check failed ({consecutive_errors}/{max_consecutive_errors}): {e}")
+            if consecutive_errors >= max_consecutive_errors:
+                raise
+            continue
+        consecutive_errors = 0
         status = JobStatusResponse(**response.json())
         print(f"Status: {status.status}")
         if status.status != "pending":

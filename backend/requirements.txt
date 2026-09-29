@@ -1,5 +1,8 @@
 transformers==4.50.0  # ACE-Step pins this; newer versions break it
 diffusers==0.33.1  # newer releases import models missing from transformers 4.50.0
-torch
+# Matched set: torchaudio >= 2.9 needs TorchCodec to save audio, which ACE-Step doesn't use
+torch==2.7.1
+torchaudio==2.7.1
+torchvision==0.22.1
 pydantic
 boto3
