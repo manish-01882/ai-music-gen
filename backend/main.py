@@ -14,7 +14,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
     .pip_install_from_requirements("requirements.txt")
-    .run_commands(["git clone https://github.com/ace-step/ACE-Step.git /tmp/ACE-Step", "cd /tmp/ACE-Step && pip install .", "pip install git+https://github.com/huggingface/transformers.git"])
+    .run_commands(["git clone https://github.com/ace-step/ACE-Step.git /tmp/ACE-Step", "cd /tmp/ACE-Step && pip install ."])
     .env({"HF_HOME": "/.cache/huggingface"})
     .add_local_python_source("prompts")
 )
@@ -89,7 +89,7 @@ class MusicGenServer:
     def load_model(self):
         from acestep.pipeline_ace_step import ACEStepPipeline
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from diffusers import AutoPipelineForText2Image
+        from diffusers import StableDiffusionXLPipeline
         import torch
 
         # Music Generation Model
@@ -113,7 +113,7 @@ class MusicGenServer:
         )
 
         # Stable Diffusion Model (thumbnails)
-        self.image_pipe = AutoPipelineForText2Image.from_pretrained(
+        self.image_pipe = StableDiffusionXLPipeline.from_pretrained(
             "stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16", cache_dir="/.cache/huggingface")
         self.image_pipe.to("cuda")
 

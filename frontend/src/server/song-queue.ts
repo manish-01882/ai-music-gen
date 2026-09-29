@@ -14,16 +14,15 @@ type QueuedSong = { id: string; userId: string };
 /**
  * Send the generation event for each song.
  *
- * The event id is derived from the song id, so Inngest drops repeats of the
- * same song for 24h. That makes it safe for the reconciler to re-send events
- * for songs that look stuck: if Inngest already has the event, nothing happens.
+ * Safe to call again for the same song: generateSong's idempotency key
+ * (event.data.songId) allows only one run per song, so the reconciler can
+ * re-send events for songs that look stuck without causing duplicate runs.
  */
 export async function sendGenerateEvents(songs: QueuedSong[]) {
   if (songs.length === 0) return;
 
   await inngest.send(
     songs.map((song) => ({
-      id: `generate-${song.id}`,
       name: "generate-song-event",
       data: { songId: song.id, userId: song.userId },
     })),

@@ -14,6 +14,12 @@ export const generateSong = inngest.createFunction(
   {
     id: "generate-song",
     retries: 2,
+    // At most one run per song per 24h. Keyed on runs, not events, so the
+    // reconciler can re-send events for stuck songs: a song that already has a
+    // run (even one waiting on the concurrency limit) is ignored, while a song
+    // whose event never started a run (e.g. sent before the app was synced)
+    // gets one.
+    idempotency: "event.data.songId",
     concurrency: {
       limit: 1,
       key: "event.data.userId",

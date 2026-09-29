@@ -1,5 +1,5 @@
-git+https://github.com/huggingface/transformers.git
-diffusers
+transformers==4.50.0  # ACE-Step pins this; newer versions break it
+diffusers==0.33.1  # newer releases import models missing from transformers 4.50.0
 torch
 pydantic
 boto3

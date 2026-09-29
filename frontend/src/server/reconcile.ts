@@ -5,7 +5,7 @@ import { sendGenerateEvents } from "~/server/song-queue";
 
 const MINUTE = 60 * 1000;
 
-// A queued song this old was probably never received by Inngest
+// A queued song this old may never have started an Inngest run
 const ORPHAN_AFTER_MS = 10 * MINUTE;
 // Give up on songs that never started
 const NEVER_STARTED_AFTER_MS = 2 * 60 * MINUTE;
@@ -30,11 +30,12 @@ const processingStartedBefore = (date: Date) => ({
 });
 
 /**
- * Re-send events for queued songs that Inngest seems never to have received.
+ * Re-send events for queued songs that never got an Inngest run.
  *
- * Events are deduped by song id, so a song that is only waiting behind the
- * per-user concurrency limit is not run twice. Songs queued for too long are
- * failed instead of being retried forever.
+ * generateSong allows one run per song id, so a song that is only waiting
+ * behind the per-user concurrency limit is not run twice, while a song whose
+ * event never started a run gets one. Songs queued for too long are failed
+ * instead of being retried forever.
  */
 async function sweepOrphans() {
   const neverStarted = await db.song.findMany({
