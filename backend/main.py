@@ -11,7 +11,7 @@ from prompts import LYRICS_GENERATOR_PROMPT, PROMPT_GENERATOR_PROMPT
 app = modal.App("music-generator")
 
 image = (
-    modal.Image.debian_slim()
+    modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
     .pip_install_from_requirements("requirements.txt")
     .run_commands(["git clone https://github.com/ace-step/ACE-Step.git /tmp/ACE-Step", "cd /tmp/ACE-Step && pip install .", "pip install git+https://github.com/huggingface/transformers.git"])
