@@ -2,13 +2,13 @@ import { NonRetriableError } from "inngest";
 import { db } from "~/server/db";
 import { inngest } from "./client";
 import { env } from "~/env";
+import { checkModalStatus, modalHeaders } from "~/server/modal";
+import { SongStatus, transitionSong } from "~/server/song-status";
+import { reconcileSongs } from "~/server/reconcile";
 
 const SUBMIT_TIMEOUT_MS = 30_000;
-const STATUS_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL = "30s";
 const MAX_POLLS = 40; // ~20 minutes
-// Must be longer than queue wait + the polling window above
-const STALE_AFTER_MS = 30 * 60 * 1000;
 
 export const generateSong = inngest.createFunction(
   {
@@ -18,17 +18,14 @@ export const generateSong = inngest.createFunction(
       limit: 1,
       key: "event.data.userId",
     },
-    onFailure: async ({ event }) => {
-      // updateMany so a song that already finished is never overwritten
-      await db.song.updateMany({
-        where: {
-          id: (event?.data?.event?.data as { songId: string }).songId,
-          status: { not: "processed" },
-        },
-        data: {
-          status: "failed",
-        },
-      });
+    onFailure: async ({ event, error }) => {
+      // Guarded so a song that already finished is never overwritten
+      await transitionSong(
+        (event.data.event.data as { songId: string }).songId,
+        [SongStatus.queued, SongStatus.processing],
+        SongStatus.failed,
+        { lastError: error.message.slice(0, 1000) },
+      );
     },
   },
   { event: "generate-song-event" },
@@ -59,6 +56,7 @@ export const generateSong = inngest.createFunction(
         });
 
         type RequestBody = {
+          song_id: string;
           guidance_scale?: number;
           infer_step?: number;
           audio_duration?: number;
@@ -70,16 +68,19 @@ export const generateSong = inngest.createFunction(
           instrumental?: boolean;
         };
 
-        let endpoint = "";
-        let body: RequestBody = {};
-
         const commomParams = {
+          // Idempotency key: the backend returns the existing job for a song
+          // instead of starting a second one
+          song_id: songId,
           guidance_scale: song.guidanceScale ?? undefined,
           infer_step: song.inferStep ?? undefined,
           audio_duration: song.audioDuration ?? undefined,
           seed: song.seed ?? undefined,
           instrumental: song.instrumental ?? undefined,
         };
+
+        let endpoint: string;
+        let body: RequestBody;
 
         // Description of a song
         if (song.fullDescribedSong) {
@@ -90,24 +91,27 @@ export const generateSong = inngest.createFunction(
           };
         }
 
-        // Custom mode: Lyrics + prompt
-        else if (song.lyrics && song.prompt) {
-          endpoint = env.GENERATE_WITH_LYRICS;
-          body = {
-            lyrics: song.lyrics,
-            prompt: song.prompt,
-            ...commomParams,
-          };
-        }
-
         // Custom mode: Prompt + described lyrics
-        else if (song.describedLyrics && song.prompt) {
+        else if (song.prompt && song.describedLyrics) {
           endpoint = env.GENERATE_FROM_DESCRIBED_LYRICS;
           body = {
             described_lyrics: song.describedLyrics,
             prompt: song.prompt,
             ...commomParams,
           };
+        }
+
+        // Custom mode: Prompt + lyrics. Lyrics may be empty for instrumentals;
+        // the backend replaces them with "[instrumental]"
+        else if (song.prompt) {
+          endpoint = env.GENERATE_WITH_LYRICS;
+          body = {
+            lyrics: song.lyrics ?? "",
+            prompt: song.prompt,
+            ...commomParams,
+          };
+        } else {
+          throw new NonRetriableError("Song has no prompt or description");
         }
 
         return {
@@ -117,26 +121,28 @@ export const generateSong = inngest.createFunction(
       },
     );
 
-    // Set status to processing
-    await step.run("set-status-processing", async () => {
-      return await db.song.update({
-        where: {
-          id: songId,
-        },
-        data: {
-          status: "processing",
-        },
-      });
+    // Set status to processing. Fails if the song already finished or was
+    // marked failed (e.g. by the reconciler), in which case there is nothing to do.
+    const started = await step.run("set-status-processing", async () => {
+      return await transitionSong(
+        songId,
+        [SongStatus.queued, SongStatus.processing],
+        SongStatus.processing,
+        { processingStartedAt: new Date() },
+      );
     });
 
-    const modalHeaders = {
-      "Content-Type": "application/json",
-      "Modal-Key": env.MODAL_KEY,
-      "Modal-Secret": env.MODAL_SECRET,
-    };
+    if (!started) return;
 
     // Queue the job on Modal. This returns right away with a call id.
     const callId = await step.run("submit-job", async () => {
+      // A previous attempt may have submitted before failing to return
+      const existing = await db.song.findUniqueOrThrow({
+        where: { id: songId },
+        select: { modalCallId: true },
+      });
+      if (existing.modalCallId) return existing.modalCallId;
+
       const response = await fetch(endpoint, {
         method: "POST",
         body: JSON.stringify(body),
@@ -164,28 +170,9 @@ export const generateSong = inngest.createFunction(
     for (let i = 0; i < MAX_POLLS; i++) {
       await step.sleep(`wait-${i}`, POLL_INTERVAL);
 
-      const result = await step.run(`check-${i}`, async () => {
-        const url = new URL(env.GENERATION_STATUS_URL);
-        url.searchParams.set("call_id", callId);
-
-        const response = await fetch(url, {
-          headers: modalHeaders,
-          signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
-        });
-
-        if (!response.ok) {
-          throw new Error(
-            `Failed to check job status: ${response.status} ${await response.text()}`,
-          );
-        }
-
-        return (await response.json()) as {
-          status: "pending" | "done" | "failed";
-          s3_key?: string;
-          cover_image_s3_key?: string;
-          error?: string;
-        };
-      });
+      const result = await step.run(`check-${i}`, () =>
+        checkModalStatus(callId),
+      );
 
       if (result.status === "failed") {
         throw new NonRetriableError(result.error ?? "Generation failed");
@@ -193,14 +180,16 @@ export const generateSong = inngest.createFunction(
 
       if (result.status === "done") {
         await step.run("update-song-result", async () => {
-          await db.song.update({
-            where: { id: songId },
-            data: {
+          await transitionSong(
+            songId,
+            [SongStatus.processing],
+            SongStatus.processed,
+            {
               s3Key: result.s3_key,
               thumbnailS3Key: result.cover_image_s3_key,
-              status: "processed",
+              lastError: null,
             },
-          });
+          );
         });
         return;
       }
@@ -210,21 +199,12 @@ export const generateSong = inngest.createFunction(
   },
 );
 
-// Safety net for runs that vanished without reaching onFailure
-// (e.g. the Inngest dev server was stopped mid-run)
-export const cleanupStaleSongs = inngest.createFunction(
-  { id: "cleanup-stale-songs" },
-  { cron: "*/10 * * * *" },
+// Recovers or settles songs the flow above lost track of. The same sweep is
+// also exposed at /api/cron/reconcile so it still runs if Inngest is down.
+export const reconcileSongsCron = inngest.createFunction(
+  { id: "reconcile-songs" },
+  { cron: "*/5 * * * *" },
   async ({ step }) => {
-    return await step.run("mark-stale-songs-failed", async () => {
-      const { count } = await db.song.updateMany({
-        where: {
-          status: { in: ["queued", "processing"] },
-          updatedAt: { lt: new Date(Date.now() - STALE_AFTER_MS) },
-        },
-        data: { status: "failed" },
-      });
-      return { markedFailed: count };
-    });
+    return await step.run("reconcile", () => reconcileSongs());
   },
 );

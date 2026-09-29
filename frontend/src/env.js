@@ -22,6 +22,7 @@ export const env = createEnv({
     GENERATE_FROM_DESCRIBED_LYRICS: z.string(),
     GENERATE_WITH_LYRICS: z.string(),
     GENERATION_STATUS_URL: z.string(),
+    CRON_SECRET: z.string().optional(),
   },
 
   /**
@@ -51,6 +52,7 @@ export const env = createEnv({
     GENERATE_FROM_DESCRIBED_LYRICS: process.env.GENERATE_FROM_DESCRIBED_LYRICS,
     GENERATE_WITH_LYRICS: process.env.GENERATE_WITH_LYRICS,
     GENERATION_STATUS_URL: process.env.GENERATION_STATUS_URL,
+    CRON_SECRET: process.env.CRON_SECRET,
     // NEXT_PUBLIC_CLIENTVAR: process.env.NEXT_PUBLIC_CLIENTVAR,
   },
   /**

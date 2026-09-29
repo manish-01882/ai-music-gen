@@ -31,6 +31,10 @@ hf_volume = modal.Volume.from_name("qwen-hf-cache", create_if_missing=True)
 
 music_gen_secrets = modal.Secret.from_name("music-gen-secrets")
 
+# song_id -> call_id, so a retried submit for the same song reuses its job
+# instead of starting a second GPU run
+job_calls = modal.Dict.from_name("music-gen-jobs", create_if_missing=True)
+
 
 class AudioGenerationBase(BaseModel):
     audio_duration: float = 180.0
@@ -38,6 +42,8 @@ class AudioGenerationBase(BaseModel):
     guidance_scale: float = 15.0
     infer_step: int = 60
     instrumental: bool = False
+    # Idempotency key; not a generation parameter
+    song_id: Optional[str] = None
 
 
 class GenerateFromDescriptionRequest(AudioGenerationBase):
@@ -233,27 +239,43 @@ class MusicGenServer:
 
 # Lightweight CPU endpoints: they queue work on the GPU class and return immediately,
 # so a request never blocks for the length of a generation.
-def spawn_job(mode: str, payload: dict) -> SubmitJobResponse:
+def spawn_job(mode: str, request: AudioGenerationBase) -> SubmitJobResponse:
+    song_id = request.song_id
+    payload = request.model_dump(exclude={"song_id"})
+
+    if song_id is None:
+        call = MusicGenServer().run_job.spawn(mode, payload)
+        return SubmitJobResponse(call_id=call.object_id)
+
+    existing = job_calls.get(song_id)
+    if existing is not None:
+        return SubmitJobResponse(call_id=existing)
+
     call = MusicGenServer().run_job.spawn(mode, payload)
+    if not job_calls.put(song_id, call.object_id, skip_if_exists=True):
+        # A concurrent submit for the same song won the race; keep its job
+        call.cancel()
+        return SubmitJobResponse(call_id=job_calls[song_id])
+
     return SubmitJobResponse(call_id=call.object_id)
 
 
 @app.function(image=web_image)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def generate_from_description(request: GenerateFromDescriptionRequest) -> SubmitJobResponse:
-    return spawn_job("description", request.model_dump())
+    return spawn_job("description", request)
 
 
 @app.function(image=web_image)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def generate_with_lyrics(request: GenerateWithCustomLyricsRequest) -> SubmitJobResponse:
-    return spawn_job("lyrics", request.model_dump())
+    return spawn_job("lyrics", request)
 
 
 @app.function(image=web_image)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def generate_with_described_lyrics(request: GenerateWithDescribedLyricsRequest) -> SubmitJobResponse:
-    return spawn_job("described_lyrics", request.model_dump())
+    return spawn_job("described_lyrics", request)
 
 
 @app.function(image=web_image)

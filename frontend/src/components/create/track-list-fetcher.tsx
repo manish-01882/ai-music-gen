@@ -2,7 +2,7 @@
 
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { getPresignedUrl } from "~/actions/generation";
+import { getPresignedUrl } from "~/server/s3";
 import { auth } from "~/lib/auth";
 import { db } from "~/server/db";
 import { TrackList } from "./track-list";

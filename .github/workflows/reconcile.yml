@@ -1,0 +1,23 @@
+# Runs the song reconciler every 10 minutes, independently of Inngest.
+# Needs repo secrets RECONCILE_URL (https://<your-domain>/api/cron/reconcile)
+# and CRON_SECRET (same value as the Vercel env var).
+name: Reconcile songs
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call reconcile endpoint
+        env:
+          RECONCILE_URL: ${{ secrets.RECONCILE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 120 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$RECONCILE_URL"

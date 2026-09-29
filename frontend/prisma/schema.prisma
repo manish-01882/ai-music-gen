@@ -39,6 +39,8 @@ model Song {
   audioDuration Float?
   seed Float?
   modalCallId String?
+  lastError String?
+  processingStartedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

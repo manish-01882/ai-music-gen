@@ -77,6 +77,10 @@ export function SongPanel() {
       toast.error("Please add some styles for your song.");
       return;
     }
+    if (mode === "custom" && !instrumental && !lyrics.trim()) {
+      toast.error("Please add lyrics, or make the song instrumental.");
+      return;
+    }
 
     // Generate song
     let requestBody: GenerateRequest;
